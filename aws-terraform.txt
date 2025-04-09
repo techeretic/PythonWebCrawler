@@ -1,0 +1,151 @@
+provider "aws" {
+  region = "us-east-1"  # Change to your preferred region
+}
+
+# IAM role for Lambda
+resource "aws_iam_role" "web_crawler_lambda_role" {
+  name = "web_crawler_lambda_role"
+  
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      },
+    ]
+  })
+}
+
+# Lambda execution policy
+resource "aws_iam_policy" "web_crawler_lambda_policy" {
+  name        = "web_crawler_lambda_policy"
+  description = "Policy for web crawler Lambda function"
+  
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Effect   = "Allow"
+        Resource = "arn:aws:logs:*:*:*"
+      },
+      {
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:ListBucket"
+        ]
+        Effect   = "Allow"
+        Resource = [
+          "arn:aws:s3:::${var.s3_bucket}",
+          "arn:aws:s3:::${var.s3_bucket}/*"
+        ]
+      }
+    ]
+  })
+}
+
+# Attach policy to role
+resource "aws_iam_role_policy_attachment" "web_crawler_lambda_policy_attachment" {
+  role       = aws_iam_role.web_crawler_lambda_role.name
+  policy_arn = aws_iam_policy.web_crawler_lambda_policy.arn
+}
+
+# S3 bucket for reports
+resource "aws_s3_bucket" "web_crawler_reports" {
+  bucket = var.s3_bucket
+}
+
+# Lambda function
+resource "aws_lambda_function" "web_crawler" {
+  function_name    = "web-crawler-broken-links"
+  role             = aws_iam_role.web_crawler_lambda_role.arn
+  handler          = "lambda_function.lambda_handler"
+  runtime          = "python3.9"
+  timeout          = 300  # 5 minutes
+  memory_size      = 512  # MB
+  
+  filename         = "web_crawler_lambda.zip"
+  source_code_hash = filebase64sha256("web_crawler_lambda.zip")
+  
+  environment {
+    variables = {
+      START_URL        = var.start_url
+      EXCLUDE_PATTERNS = jsonencode(var.exclude_patterns)
+      MAX_PAGES        = var.max_pages
+      S3_BUCKET        = var.s3_bucket
+    }
+  }
+}
+
+# CloudWatch Event Rule for daily execution
+resource "aws_cloudwatch_event_rule" "daily_crawler_execution" {
+  name                = "daily-web-crawler-execution"
+  description         = "Triggers web crawler Lambda function daily"
+  schedule_expression = "cron(0 1 * * ? *)"  # Run at 1:00 AM UTC every day
+}
+
+# Target for CloudWatch Event Rule
+resource "aws_cloudwatch_event_target" "lambda_target" {
+  rule      = aws_cloudwatch_event_rule.daily_crawler_execution.name
+  target_id = "WebCrawlerLambda"
+  arn       = aws_lambda_function.web_crawler.arn
+}
+
+# Permission for CloudWatch to invoke Lambda
+resource "aws_lambda_permission" "allow_cloudwatch" {
+  statement_id  = "AllowExecutionFromCloudWatch"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.web_crawler.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.daily_crawler_execution.arn
+}
+
+# Variables
+variable "s3_bucket" {
+  description = "S3 bucket name for storing reports"
+  default     = "web-crawler-reports"  # Change to your preferred bucket name
+}
+
+variable "start_url" {
+  description = "Starting URL for the web crawler"
+  default     = "https://example.com"  # Change to your website
+}
+
+variable "exclude_patterns" {
+  description = "URL patterns to exclude from crawling"
+  type        = list(string)
+  default     = [
+    "/logout",
+    "/admin",
+    "/cart",
+    "?sort=",
+    "/download"
+  ]
+}
+
+variable "max_pages" {
+  description = "Maximum number of pages to crawl"
+  default     = 100
+}
+
+# Outputs
+output "lambda_function_arn" {
+  value = aws_lambda_function.web_crawler.arn
+}
+
+output "s3_bucket_name" {
+  value = aws_s3_bucket.web_crawler_reports.bucket
+}
+
+output "cloudwatch_rule_arn" {
+  value = aws_cloudwatch_event_rule.daily_crawler_execution.arn
+}
